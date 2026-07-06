@@ -60,17 +60,8 @@ This project crawls men's sandals, slides, and flip-flops from multiple premium 
     │   └── parser_utils.py
     └── spiders/
         ├── __init__.py
-        ├── adidas.py
-        ├── alexandermcqueen.py
         ├── crawl_all.py
-        ├── asos.py
-        ├── columbia.py
-        ├── crocs.py
-        ├── farfetch.py
-        ├── nordstrom.py
         ├── selle_sandals.py
-        ├── skechers.py
-        ├── underarmour.py
         ├── zappos.py
         └── __init__.py
 ```
@@ -96,10 +87,11 @@ pip install -r requirements.txt
 4. Run a single spider:
 
 ```bash
-scrapy crawl skechers
+scrapy crawl zappos
+scrapy crawl selle-sandals
 ```
 
-5. Run all spiders sequentially:
+5. Run all active spiders sequentially:
 
 ```bash
 scrapy crawl all
@@ -130,26 +122,24 @@ Each folder contains a `metadata.json` file populated according to the canonical
 
 ```json
 {
-  "brand": "Skechers",
-  "product_name": "GO WALK Arch Fit Sandal",
+  "brand": "Zappos",
+  "product_name": "Men's Sandal",
   "gender": "Men",
   "category": "Sandals",
-  "sku": "216264-BBK",
-  "variant": "BBK",
+  "sku": "123456",
+  "variant": "Default",
   "color": "Black",
-  "price": "65.00",
+  "price": "69.95",
   "availability": "In Stock",
-  "product_url": "https://www.skechers.com/mens/sandals/go-walk-arch-fit-sandal/216264_BBK.html",
+  "product_url": "https://www.zappos.com/p/men-sandal/product/123456",
   "images": [
-    "Skechers/GO WALK Arch Fit Sandal/Black/000.jpg",
-    "Skechers/GO WALK Arch Fit Sandal/Black/001.jpg"
+    "Zappos/Men's Sandal/Black/000.jpg",
+    "Zappos/Men's Sandal/Black/001.jpg"
   ]
 }
 ```
 
 ---
-
-## Configuration
 
 Tunable options are set in `manual_scraper_ext/settings.py` and can be overridden per-spider.
 
@@ -174,16 +164,7 @@ scrapy list
 
 Run a specific site spider:
 ```bash
-scrapy crawl skechers
-scrapy crawl underarmour
-scrapy crawl columbia
-#scrapy crawl asos
-scrapy crawl nordstrom
 scrapy crawl zappos
-scrapy crawl crocs
-scrapy crawl adidas
-scrapy crawl alexandermcqueen
-scrapy crawl farfetch
 scrapy crawl selle-sandals
 ```
 
@@ -204,6 +185,38 @@ scrapy crawl all
 | Requests getting blocked (403/429) | Increase `DOWNLOAD_DELAY` or check your local proxy configuration. |
 
 ---
+
+---
+
+## Disabled / Manual Sites
+
+- **Adidas**: automated image extraction is currently unreliable for `adidas`. The spider is excluded by default. You can still find the category entry points here:
+
+  - https://www.adidas.com/us/men-sandals
+  - https://www.adidas.com/us/men-slides
+
+- **Columbia**: automated image extraction can be unreliable for `columbia`. The spider is excluded by default. You can still find the category entry points here:
+
+  - https://www.columbia.com/c/mens-sandals/
+  - https://www.columbia.com/c/mens-slides/
+
+- **Crocs**: Crocs listing pages are actively blocking automated requests (403/429). The spider is excluded by default. Category entry point:
+
+  - https://www.crocs.com/c/men/footwear/sandals
+
+- **Farfetch**: Farfetch product and listing pages are not reliably accessible for automated image scraping. The spider is excluded by default; use manual browsing if needed. Example product page:
+
+  - https://www.farfetch.com/pk/shopping/men/christian-louboutin-chambelimuly-leather-sandals-item-34890600.aspx
+
+- **ASOS**: ASOS category and product APIs are currently blocked for automated requests and return 403/challenge responses. The spider is excluded by default for now.
+
+- **Alexander McQueen**: automated image scraping for `alexandermcqueen` is not reliable enough. The spider is excluded by default; product pages should be scraped manually if needed.
+
+- **Under Armour**: Under Armour enforces strict bot checks on category and product pages (HTTP 418 / challenge). Automated scraping with current middleware is unreliable; the spider is excluded by default and should be scraped manually if needed. Example category page:
+
+  - https://www.underarmour.com/en-us/c/mens/shoes/sandals-slides/
+
+- **Nordstrom**: Nordstrom's site requires careful Playwright rendering and the current automated flow did not yield downloadable product images in testing. Marked as manual-only for now; scrape manually if needed.
 
 ## How to Add a New Website
 

@@ -88,6 +88,12 @@ FEED_EXPORT_ENCODING = "utf-8"
 # Most e-commerce sites don't have real CAPTCHA, just browser checks.
 BROWSER_RENDERING_ENABLED = True
 
+# Use Selenium to open a real browser for interactive CAPTCHA solving.
+# When True, the Selenium middleware will launch a visible Chrome window
+# for pages that look like bot challenges. This is intended for manual,
+# one-off runs where the operator can solve the CAPTCHA interactively.
+SELENIUM_CHALLENGE_ENABLED = True
+
 # ── Skip Image Download (for testing CAPTCHA/challenges without storage) ──────
 # Set to True to run spiders without saving images to dataset folder.
 # Useful for testing challenge handling and validating spider logic.
@@ -97,11 +103,15 @@ SKIP_IMAGE_DOWNLOAD = False
 # List of spider names to skip during execution (e.g., ['selle_sandals', 'asos']).
 # Useful when running crawl_all to exclude specific sites.
 # Usage: scrapy crawl crawl_all -a skip_spiders="selle_sandals,asos"
+# No excluded spiders are configured; only the active spiders are kept in the project.
 EXCLUDED_SPIDERS = []
+
 
 # Enable the challenge middleware (placed after the standard retry middleware at 550)
 # Uses browser rendering (Playwright) to bypass bot challenges.
 DOWNLOADER_MIDDLEWARES = {
+    # Selenium-based interactive challenge handler (runs before Playwright)
+    "manual_scraper_ext.selenium_captcha_middleware.SeleniumChallengeMiddleware": 585,
     "manual_scraper_ext.qwen_captcha_middleware.BrowserRenderingChallengeMiddleware": 590,
 }
 

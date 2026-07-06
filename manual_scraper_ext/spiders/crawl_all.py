@@ -37,30 +37,13 @@ from manual_scraper_ext.base.base_spider import _BASE_CUSTOM_SETTINGS
 
 def _all_spider_classes():
     """Return list of all concrete spider classes (excluding this one)."""
-    from manual_scraper_ext.spiders.skechers import SkechersSpider
-    from manual_scraper_ext.spiders.underarmour import UnderarmourSpider
-    from manual_scraper_ext.spiders.columbia import ColumbiaSpider
-    from manual_scraper_ext.spiders.asos import AsosSpider
-    from manual_scraper_ext.spiders.nordstrom import NordstromSpider
-    from manual_scraper_ext.spiders.zappos import ZapposSpider
-    from manual_scraper_ext.spiders.crocs import CrocsSpider
-    from manual_scraper_ext.spiders.adidas import AdidasSpider
-    from manual_scraper_ext.spiders.alexandermcqueen import AlexanderMcQueenSpider
-    from manual_scraper_ext.spiders.farfetch import FarfetchSpider
+    # Limit the sequential crawl to the two active spiders only
     from manual_scraper_ext.spiders.selle_sandals import SelleSandalsSpider
+    from manual_scraper_ext.spiders.zappos import ZapposSpider
 
     return [
         SelleSandalsSpider,
-        SkechersSpider,
-        UnderarmourSpider,
-        ColumbiaSpider,
-        AsosSpider,
-        NordstromSpider,
         ZapposSpider,
-        CrocsSpider,
-        AdidasSpider,
-        AlexanderMcQueenSpider,
-        FarfetchSpider,
     ]
 
 
@@ -69,7 +52,7 @@ class AllSandalsSpider(scrapy.Spider):
     Meta-spider: dispatches start requests from every registered spider
     and routes responses through each spider's own ``parse`` callback.
 
-    This gives a single unified crawl across all 11 sites while keeping the
+    This gives a single unified crawl across the active spiders while keeping the
     images pipeline, logging, and deduplication operating at the project level.
     """
 
