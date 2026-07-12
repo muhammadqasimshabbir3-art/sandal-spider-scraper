@@ -227,7 +227,7 @@ class BaseSandalSpider(scrapy.Spider):
         excluded_list = self.settings.getlist("EXCLUDED_SPIDERS", [])
         
         # Also check if skip_spiders was passed as a spider argument
-        # Usage: scrapy crawl crawl_all -a skip_spiders="selle_sandals,asos"
+        # Usage: scrapy crawl all -a skip_spiders="selle-sandals,zappos"
         skip_spiders_arg = getattr(self, "skip_spiders", None)
         if skip_spiders_arg:
             excluded_list.extend([s.strip() for s in skip_spiders_arg.split(",")])

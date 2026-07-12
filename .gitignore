@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.scrapy/
+
+# Scraper outputs
+dataset/
+images/
+output/
+logs/
+
+# Trusted Chrome session (do not commit credentials / cookies)
+chrome_profile/
+cookies/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Local dumps
+*.html
+!**/templates/**

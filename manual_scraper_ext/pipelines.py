@@ -246,9 +246,13 @@ class DatasetImagesPipeline(ImagesPipeline):
         if self.skip_image_download:
             # When skipping downloads, just track stats and return
             info.spider.logger.debug("[ImagePipeline] Skipping metadata write (SKIP_IMAGE_DOWNLOAD=True)")
-            item["images"] = []
+            item["images"] = item.get("images") or []
             return item
-        
+
+        # Spider may have pre-downloaded images (e.g. Farfetch Chrome cookies)
+        if not results and item.get("images"):
+            return item
+
         downloaded = [
             x["path"] for ok, x in results if ok and isinstance(x, dict)
         ]

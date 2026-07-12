@@ -5,6 +5,8 @@
 #  any setting via its ``custom_settings`` class attribute.
 # ─────────────────────────────────────────────────────────────────────────────
 
+from pathlib import Path as _Path
+
 BOT_NAME = "sandal_spider_scraper"
 
 SPIDER_MODULES = ["manual_scraper_ext.spiders"]
@@ -83,6 +85,14 @@ REQUEST_FINGERPRINTER_IMPLEMENTATION = "2.7"
 TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
 FEED_EXPORT_ENCODING = "utf-8"
 
+# ── Persistent Chrome profile (Google login + site trust) ─────────────────────
+# Run once:  python tools/setup_chrome_login.py
+# Then Scrapy reuses cookies/session.json and the same profile on challenges.
+_PROJECT_ROOT = _Path(__file__).resolve().parent.parent
+CHROME_PROFILE_DIR = str(_PROJECT_ROOT / "chrome_profile")
+CHROME_COOKIES_FILE = str(_PROJECT_ROOT / "cookies" / "session.json")
+CHROME_COOKIES_ENABLED = True
+
 # ── Browser Rendering for Challenges ─────────────────────────────────────────
 # Use Playwright browser rendering to bypass bot challenges.
 # Most e-commerce sites don't have real CAPTCHA, just browser checks.
@@ -100,17 +110,15 @@ SELENIUM_CHALLENGE_ENABLED = True
 SKIP_IMAGE_DOWNLOAD = False
 
 # ── Skip Specific Spiders ─────────────────────────────────────────────────────
-# List of spider names to skip during execution (e.g., ['selle_sandals', 'asos']).
+# List of spider names to skip during execution (e.g., ['selle-sandals']).
 # Useful when running crawl_all to exclude specific sites.
-# Usage: scrapy crawl crawl_all -a skip_spiders="selle_sandals,asos"
-# No excluded spiders are configured; only the active spiders are kept in the project.
+# Usage: scrapy crawl all -a skip_spiders="selle-sandals,zappos"
 EXCLUDED_SPIDERS = []
 
-
-# Enable the challenge middleware (placed after the standard retry middleware at 550)
-# Uses browser rendering (Playwright) to bypass bot challenges.
+# Enable cookie injection + challenge middlewares
 DOWNLOADER_MIDDLEWARES = {
-    # Selenium-based interactive challenge handler (runs before Playwright)
+    "manual_scraper_ext.chrome_cookie_middleware.ChromeCookieMiddleware": 540,
+    # Selenium-based interactive challenge handler (runs before Playwright retry)
     "manual_scraper_ext.selenium_captcha_middleware.SeleniumChallengeMiddleware": 585,
     "manual_scraper_ext.qwen_captcha_middleware.BrowserRenderingChallengeMiddleware": 590,
 }
@@ -119,6 +127,25 @@ DOWNLOADER_MIDDLEWARES = {
 # Allow 418 and 403 to reach the spider's parse methods (so they can log/skip)
 # Note: individual spiders may override this list.
 HTTPERROR_ALLOWED_CODES = [418, 403]
+
+# ── Farfetch (undetected Chrome) ──────────────────────────────────────────────
+# Headless is on by default in the spider; override on CLI if needed:
+#   scrapy crawl farfetch -s FARFETCH_SELENIUM_HEADLESS=False
+FARFETCH_SELENIUM_HEADLESS = True
+FARFETCH_PDP_WAIT = 6
+FARFETCH_CDN_WORKERS = 8
+FARFETCH_RESUME_MIN_IMAGES = 4
+
+# ── Nordstrom (undetected Chrome) ─────────────────────────────────────────────
+# True --headless is blocked (invitation.html). Default uses offscreen Chrome
+# (fast, no visible window, catalog works):
+#   scrapy crawl nordstrom
+# True headless (usually blocked): -s NORDSTROM_HEADLESS_STYLE=real
+# Visible window: -s NORDSTROM_SELENIUM_HEADLESS=False
+NORDSTROM_SELENIUM_HEADLESS = True
+NORDSTROM_HEADLESS_STYLE = "offscreen"
+NORDSTROM_PDP_WAIT = 5
+NORDSTROM_RESUME_MIN_IMAGES = 4
 
 # ── Logging Configuration ─────────────────────────────────────────────────────
 # For Kaggle/limited output environments:

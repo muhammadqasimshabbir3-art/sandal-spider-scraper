@@ -1,74 +1,57 @@
 """
 crawl_all.py
 ~~~~~~~~~~~~
-Meta-spider that sequentially runs every sandal spider in the framework.
+Meta-spider that runs every active sandal spider.
 
 Usage::
 
     scrapy crawl all
 
-This spider imports all registered spiders, starts them one after the other,
-and logs a summary when finished.
-
-Implementation
---------------
-Scrapy does not natively support running multiple spiders in one process in
-sequence.  This spider achieves sequential crawling by subclassing
-``CrawlerProcess`` logic inside a normal Scrapy spider — specifically by
-using a special start_requests approach that dispatches to every registered
-spider's start_urls and parse methods, effectively merging them all into a
-single crawl.
-
-Note: because Scrapy shares a single downloader and pipeline across all
-requests, the images from all sites will be correctly routed through the
-``DatasetImagesPipeline`` and saved per-brand under the ``dataset/`` folder.
+Active sites:
+  nordstrom, farfetch, zappos, selle-sandals
 """
 
 from __future__ import annotations
-
-from typing import Iterator
 
 import scrapy
 
 from manual_scraper_ext.base.base_spider import _BASE_CUSTOM_SETTINGS
 
-# ── Registry of all site spiders ──────────────────────────────────────────────
-# Import lazily so missing optional dependencies don't block the module load.
 
 def _all_spider_classes():
-    """Return list of all concrete spider classes (excluding this one)."""
-    # Limit the sequential crawl to the two active spiders only
-    from manual_scraper_ext.spiders.selle_sandals import SelleSandalsSpider
+    """Return list of active spider classes (excluding this meta spider)."""
+    from manual_scraper_ext.spiders.nordstrom import NordstromSpider
+    from manual_scraper_ext.spiders.farfetch import FarfetchSpider
     from manual_scraper_ext.spiders.zappos import ZapposSpider
+    from manual_scraper_ext.spiders.selle_sandals import SelleSandalsSpider
 
     return [
-        SelleSandalsSpider,
+        NordstromSpider,
+        FarfetchSpider,
         ZapposSpider,
+        SelleSandalsSpider,
     ]
 
 
 class AllSandalsSpider(scrapy.Spider):
-    """
-    Meta-spider: dispatches start requests from every registered spider
-    and routes responses through each spider's own ``parse`` callback.
-
-    This gives a single unified crawl across the active spiders while keeping the
-    images pipeline, logging, and deduplication operating at the project level.
-    """
+    """Dispatch start requests from every active site spider."""
 
     name = "all"
 
     custom_settings = dict(_BASE_CUSTOM_SETTINGS)
 
     async def start(self):
-        """Emit start requests for every registered spider."""
         spider_classes = _all_spider_classes()
+        excluded = set(self.settings.getlist("EXCLUDED_SPIDERS") or [])
+        skip_arg = getattr(self, "skip_spiders", "") or ""
+        if skip_arg:
+            excluded.update(s.strip() for s in skip_arg.split(",") if s.strip())
 
         for spider_cls in spider_classes:
-            self.logger.info(
-                "Queueing start URLs for spider: %s", spider_cls.name
-            )
-            # Instantiate using from_crawler to ensure proper initialization
+            if spider_cls.name in excluded:
+                self.logger.info("Skipping excluded spider: %s", spider_cls.name)
+                continue
+            self.logger.info("Queueing start URLs for spider: %s", spider_cls.name)
             dummy = spider_cls.from_crawler(self.crawler)
 
             try:
@@ -87,15 +70,12 @@ class AllSandalsSpider(scrapy.Spider):
                             yield req
             except Exception as e:
                 self.logger.warning(
-                    "Error running start for %s: %s",
-                    spider_cls.name, e
+                    "Error running start for %s: %s", spider_cls.name, e
                 )
 
     def parse(self, response):
-        """Fallback parse — should not normally be called."""
         self.logger.warning(
-            "AllSandalsSpider.parse called for %s — "
-            "this is a routing fallback and may indicate a misconfiguration.",
+            "AllSandalsSpider.parse called for %s — routing fallback.",
             response.url,
         )
         return []
