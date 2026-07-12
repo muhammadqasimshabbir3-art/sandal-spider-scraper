@@ -270,25 +270,24 @@ class DatasetImagesPipeline(ImagesPipeline):
         meta = dict(item.get("meta", {}))
         meta["images"] = downloaded
 
-        # Write metadata.json
+        # Write metadata.json next to the actual image files.
+        # DatasetImagesPipeline.file_path returns Brand/Product/Color/NNN.ext
+        # and Scrapy stores that under IMAGES_STORE/ (no extra "full/" prefix).
+        store = info.spider.settings.get("IMAGES_STORE", "dataset")
         if downloaded:
-            # Derive folder from the first downloaded path.
-            # Scrapy stores images at: <IMAGES_STORE>/full/<file_path()> for
-            # ImagesPipeline.  DatasetImagesPipeline's file_path returns
-            # Brand/Product/Color/NNN.ext so the actual path on disk is:
-            #   <IMAGES_STORE>/full/<Brand>/<Product>/<Color>/NNN.ext
-            store = info.spider.settings.get("IMAGES_STORE", "dataset")
-            first_path = os.path.join(store, "full", downloaded[0])
+            first_path = os.path.join(store, downloaded[0])
             folder = os.path.dirname(first_path)
+            # Legacy: some runs wrote under full/ — prefer folder that has files
+            legacy = os.path.join(store, "full", downloaded[0])
+            if not os.path.isfile(first_path) and os.path.isfile(legacy):
+                folder = os.path.dirname(legacy)
         else:
-            # No images downloaded — still write metadata next to where they
-            # would have been saved
-            store = info.spider.settings.get("IMAGES_STORE", "dataset")
-            brand        = safe_name(meta.get("brand", "Unknown"), 60)
+            brand = safe_name(meta.get("brand", "Unknown"), 60)
             product_name = safe_name(meta.get("product_name", "Unknown"), 80)
-            color        = safe_name(meta.get("color", "Default"), 40)
-            folder = os.path.join(store, "full", brand, product_name, color)
+            color = safe_name(meta.get("color", "Default"), 40)
+            folder = os.path.join(store, brand, product_name, color)
 
+        os.makedirs(folder, exist_ok=True)
         write_metadata_json(folder, meta)
         
         # Update progress bar

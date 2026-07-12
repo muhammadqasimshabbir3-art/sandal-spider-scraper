@@ -101,6 +101,9 @@ class NordstromSpider(EcommerceSpider):
         "NORDSTROM_HEADLESS_STYLE": "offscreen",  # or "real"
         "NORDSTROM_PDP_WAIT": 5,
         "NORDSTROM_RESUME_MIN_IMAGES": 4,
+        # Retry PDPs that hit invitation.html
+        "NORDSTROM_PDP_RETRIES": 3,
+        "NORDSTROM_BLOCK_COOLDOWN": 3.0,
     }
 
     def __init__(self, *args, **kwargs):
@@ -110,6 +113,10 @@ class NordstromSpider(EcommerceSpider):
         self._done_product_ids: set[str] = set()
         self._skipped_resume = 0
         self._forced_headed = False
+        self._blocked_urls: list[str] = []
+        self._incomplete_urls: list[str] = []
+        self._block_hits = 0
+        self._retry_pass = 0
 
     @classmethod
     def from_crawler(cls, crawler, *args, **kwargs):
@@ -118,6 +125,13 @@ class NordstromSpider(EcommerceSpider):
         return spider
 
     def _spider_closed(self, spider=None, reason=None):
+        if self._blocked_urls:
+            self._save_blocked_urls()
+            self.logger.info(
+                "[Nordstrom] %d PDP(s) still blocked after retries — "
+                "saved to dataset/.nordstrom_blocked.json; re-run to retry",
+                len(self._blocked_urls),
+            )
         if self._skipped_resume:
             self.logger.info(
                 "[Nordstrom] Resume skipped %d already-downloaded product(s)",
@@ -133,6 +147,26 @@ class NordstromSpider(EcommerceSpider):
                 "[Nordstrom] Resume: %d product(s) already on disk — will skip them",
                 len(self._done_product_ids),
             )
+        prev_blocked = self._load_blocked_urls()
+        # Incomplete = metadata / sparse folders that still need images
+        incomplete = list(self._incomplete_urls)
+        retry_first = []
+        seen_retry: set[str] = set()
+        for u in incomplete + prev_blocked:
+            pid = self._product_id(u)
+            key = pid or u
+            if key in seen_retry:
+                continue
+            if pid and pid in self._done_product_ids:
+                continue
+            seen_retry.add(key)
+            retry_first.append(u)
+        if retry_first:
+            self.logger.info(
+                "[Nordstrom] Will re-fetch %d incomplete/blocked PDP(s) "
+                "(metadata-only or sparse images)",
+                len(retry_first),
+            )
         self.logger.info(
             "[Nordstrom] Bootstrap: launching Chrome for listing "
             "(headless=%s, style=%s, no Scrapy HTTP to nordstrom.com)",
@@ -146,6 +180,16 @@ class NordstromSpider(EcommerceSpider):
             return
         rendered.meta["nordstrom_page"] = 1
         rendered.meta["nordstrom_rendered"] = True
+        for pdp in retry_first:
+            pid = self._product_id(pdp)
+            if pid:
+                self._seen_product_ids.add(pid)
+            yield scrapy.Request(
+                f"data:text/html,nordstrom-retry-{pid or hash(pdp)}",
+                callback=self.parse_product,
+                meta={"nordstrom_pdp_url": pdp, "dont_cache": True, "nordstrom_retry": 0},
+                dont_filter=True,
+            )
         for result in self.parse(rendered):
             yield result
 
@@ -164,6 +208,17 @@ class NordstromSpider(EcommerceSpider):
                 "[Nordstrom] Resume: %d product(s) already on disk — will skip them",
                 len(self._done_product_ids),
             )
+        prev_blocked = self._load_blocked_urls()
+        incomplete = list(self._incomplete_urls)
+        retry_first: list[str] = []
+        seen_retry: set[str] = set()
+        for u in incomplete + prev_blocked:
+            pid = self._product_id(u)
+            key = pid or u
+            if key in seen_retry or (pid and pid in self._done_product_ids):
+                continue
+            seen_retry.add(key)
+            retry_first.append(u)
         url = self.start_urls[0]
         rendered = self._open_listing(url)
         if rendered is None:
@@ -171,6 +226,16 @@ class NordstromSpider(EcommerceSpider):
             return
         rendered.meta["nordstrom_page"] = 1
         rendered.meta["nordstrom_rendered"] = True
+        for pdp in retry_first:
+            pid = self._product_id(pdp)
+            if pid:
+                self._seen_product_ids.add(pid)
+            yield scrapy.Request(
+                f"data:text/html,nordstrom-retry-{pid or hash(pdp)}",
+                callback=self.parse_product,
+                meta={"nordstrom_pdp_url": pdp, "dont_cache": True, "nordstrom_retry": 0},
+                dont_filter=True,
+            )
         yield from self.parse(rendered)
 
     def _open_listing(self, url: str) -> HtmlResponse | None:
@@ -311,6 +376,33 @@ class NordstromSpider(EcommerceSpider):
                 bool(next_url),
                 len(self._seen_product_ids),
             )
+            # Final pass: re-queue PDPs blocked this run (not yet done)
+            if self._blocked_urls and self._retry_pass < 1:
+                self._retry_pass += 1
+                pending = [
+                    u
+                    for u in list(self._blocked_urls)
+                    if self._product_id(u) not in self._done_product_ids
+                ]
+                self._blocked_urls.clear()
+                if pending:
+                    self.logger.info(
+                        "[Nordstrom] Final retry pass for %d blocked PDP(s)",
+                        len(pending),
+                    )
+                    self._rewarm_session(force=True)
+                    for pdp in pending:
+                        pid = self._product_id(pdp)
+                        yield scrapy.Request(
+                            f"data:text/html,nordstrom-final-{pid}",
+                            callback=self.parse_product,
+                            meta={
+                                "nordstrom_pdp_url": pdp,
+                                "dont_cache": True,
+                                "nordstrom_retry": 0,
+                            },
+                            dont_filter=True,
+                        )
 
     def _bootstrap_page(self, response) -> Iterator:
         url = response.meta.get("nordstrom_list_url") or self.start_urls[0]
@@ -340,12 +432,18 @@ class NordstromSpider(EcommerceSpider):
     def parse_product(self, response) -> Iterator:
         """Parse a Nordstrom product detail page via Selenium HTML."""
         pdp_url = response.meta.get("nordstrom_pdp_url") or response.url
+        # Never treat invitation URL as the product URL
+        if self._is_blocked_url(pdp_url):
+            pdp_url = response.meta.get("nordstrom_pdp_url") or pdp_url
         pid_early = self._product_id(pdp_url)
         if pid_early and pid_early in self._done_product_ids:
             self._skipped_resume += 1
             return
 
         pdp_wait = int(self.settings.getint("NORDSTROM_PDP_WAIT", 5) or 5)
+        max_retries = int(self.settings.getint("NORDSTROM_PDP_RETRIES", 3) or 3)
+        attempt = int(response.meta.get("nordstrom_retry") or 0)
+
         rendered = self._selenium_fetch(
             pdp_url, wait_seconds=pdp_wait, wait_for_gallery=True
         )
@@ -353,7 +451,38 @@ class NordstromSpider(EcommerceSpider):
             response = rendered
 
         if self._is_blocked(response):
-            self.logger.warning("[Nordstrom] Blocked PDP: %s", response.url)
+            if attempt + 1 < max_retries:
+                cooldown = float(
+                    self.settings.getfloat("NORDSTROM_BLOCK_COOLDOWN", 3.0) or 3.0
+                )
+                self._block_hits += 1
+                self.logger.warning(
+                    "[Nordstrom] Blocked PDP (attempt %d/%d) — re-warm + retry: %s",
+                    attempt + 1,
+                    max_retries,
+                    pdp_url,
+                )
+                self._rewarm_session(force=self._block_hits % 3 == 0)
+                time.sleep(cooldown + attempt)
+                yield scrapy.Request(
+                    f"data:text/html,nordstrom-pdp-{pid_early}-r{attempt + 1}",
+                    callback=self.parse_product,
+                    meta={
+                        "nordstrom_pdp_url": pdp_url,
+                        "dont_cache": True,
+                        "nordstrom_retry": attempt + 1,
+                    },
+                    dont_filter=True,
+                    priority=10,
+                )
+                return
+            self.logger.warning(
+                "[Nordstrom] Blocked PDP after %d tries — will retry next run: %s",
+                max_retries,
+                pdp_url,
+            )
+            if pdp_url not in self._blocked_urls:
+                self._blocked_urls.append(pdp_url)
             return
 
         next_data = extract_next_data(response)
@@ -375,6 +504,8 @@ class NordstromSpider(EcommerceSpider):
         )
         if not title:
             self.logger.warning("No title on %s", response.url)
+            if pdp_url not in self._blocked_urls:
+                self._blocked_urls.append(pdp_url)
             return
 
         sku = str(product.get("styleNumber") or product.get("id") or pid_early or "")
@@ -435,7 +566,8 @@ class NordstromSpider(EcommerceSpider):
                 continue
 
             existing_n = self._folder_image_count(title, color or "Default")
-            if existing_n >= max(len(color_urls), min_done):
+            # Skip only when this colour already has a full gallery on disk
+            if existing_n >= min_done and existing_n >= max(3, len(color_urls) - 2):
                 self.logger.info(
                     "[Nordstrom] Skip colour (already have %d imgs) %s / %s",
                     existing_n,
@@ -444,11 +576,18 @@ class NordstromSpider(EcommerceSpider):
                 )
                 yielded_any = True
                 continue
+            if existing_n == 0:
+                self.logger.info(
+                    "[Nordstrom] Re-download colour (metadata only / no images) "
+                    "%s / %s",
+                    title,
+                    color,
+                )
 
             yielded_any = True
             yield self.make_item(
                 product_name=title,
-                product_url=response.url,
+                product_url=pdp_url if "nordstrom.com/s/" in pdp_url else response.url,
                 image_urls=color_urls,
                 color=color,
                 sku=sku,
@@ -460,7 +599,7 @@ class NordstromSpider(EcommerceSpider):
         if not yielded_any and all_images:
             yield self.make_item(
                 product_name=title,
-                product_url=response.url,
+                product_url=pdp_url if "nordstrom.com/s/" in pdp_url else response.url,
                 image_urls=all_images[:16],
                 color="Default",
                 sku=sku,
@@ -470,6 +609,10 @@ class NordstromSpider(EcommerceSpider):
 
         if sku or pid_early:
             self._done_product_ids.add(sku or pid_early)
+            # Drop from blocked list if we succeeded
+            self._blocked_urls = [
+                u for u in self._blocked_urls if self._product_id(u) != (sku or pid_early)
+            ]
 
     # ── Selenium (single reused driver) ──────────────────────────────────────
 
@@ -596,56 +739,74 @@ class NordstromSpider(EcommerceSpider):
 
     # ── Resume helpers ───────────────────────────────────────────────────────
 
-    def _load_done_product_ids(self) -> set[str]:
+    def _blocked_path(self) -> Path:
         store = Path(self.settings.get("IMAGES_STORE", "dataset"))
-        root = store / "full"
-        if not root.is_dir():
-            return set()
-        min_imgs = int(self.settings.getint("NORDSTROM_RESUME_MIN_IMAGES", 4) or 4)
-        done: set[str] = set()
-        for meta_path in root.rglob("metadata.json"):
-            try:
-                data = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            source = (data.get("source") or "").lower()
-            url = (data.get("product_url") or "").lower()
-            if source != "nordstrom" and "nordstrom.com" not in url:
-                continue
-            pid = self._product_id(data.get("product_url") or "") or str(
-                data.get("sku") or ""
-            )
-            if not pid:
-                continue
-            n = sum(
-                1
-                for p in meta_path.parent.iterdir()
-                if p.is_file()
-                and p.suffix.lower() in _IMG_EXTS
-                and p.stat().st_size > 1000
-            )
-            if n >= min_imgs:
-                done.add(pid)
-        return done
+        return store / ".nordstrom_blocked.json"
 
-    def _folder_image_count(self, product_name: str, color: str) -> int:
-        store = Path(self.settings.get("IMAGES_STORE", "dataset"))
-        # Pipeline file_path: Brand/Product/Color — brand often overridden to
-        # product brand; check both Nordstrom and any brand folders via glob
-        candidates = [
-            store / "full" / safe_name(self.brand, 60) / safe_name(product_name, 80) / safe_name(color, 40),
-            store / "full" / safe_name(product_name, 80) / safe_name(color, 40),
+    def _load_blocked_urls(self) -> list[str]:
+        path = self._blocked_path()
+        if not path.is_file():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            urls = data if isinstance(data, list) else data.get("urls") or []
+            return [u for u in urls if isinstance(u, str) and "/s/" in u]
+        except Exception:
+            return []
+
+    def _save_blocked_urls(self) -> None:
+        path = self._blocked_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Merge with any existing
+        existing = set(self._load_blocked_urls())
+        for u in self._blocked_urls:
+            existing.add(u)
+        # Drop ones now done
+        keep = [
+            u
+            for u in sorted(existing)
+            if self._product_id(u) not in self._done_product_ids
         ]
-        # Also match Brand/*/Color when brand varies (Nordstrom sells many brands)
-        brand_glob = list(
-            (store / "full").glob(
-                f"*/{safe_name(product_name, 80)}/{safe_name(color, 40)}"
-            )
-        )
-        folders = [p for p in candidates + brand_glob if p.is_dir()]
-        if not folders:
+        path.write_text(json.dumps(keep, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _is_blocked_url(url: str) -> bool:
+        low = (url or "").lower()
+        return "siteclosed.nordstrom.com" in low or "invitation.html" in low
+
+    def _rewarm_session(self, force: bool = False) -> None:
+        """Visit listing to clear invitation redirect state."""
+        try:
+            driver = self._get_driver()
+            # Drop siteclosed cookies that stick the session
+            try:
+                for c in list(driver.get_cookies()):
+                    dom = (c.get("domain") or "").lower()
+                    name = (c.get("name") or "").lower()
+                    if "siteclosed" in dom or "invite" in name:
+                        try:
+                            driver.delete_cookie(c["name"])
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            driver.get(self.start_urls[0])
+            time.sleep(2.0 if force else 1.2)
+            if self._is_blocked_url(driver.current_url or ""):
+                self.logger.warning(
+                    "[Nordstrom] Re-warm still on invitation — cooling down 5s"
+                )
+                time.sleep(5.0)
+                driver.get("https://www.nordstrom.com/")
+                time.sleep(2.0)
+                driver.get(self.start_urls[0])
+                time.sleep(1.5)
+        except Exception as exc:
+            self.logger.debug("[Nordstrom] Re-warm failed: %s", exc)
+
+    def _count_imgs_in(self, folder: Path) -> int:
+        if not folder.is_dir():
             return 0
-        folder = folders[0]
         return sum(
             1
             for p in folder.iterdir()
@@ -653,6 +814,138 @@ class NordstromSpider(EcommerceSpider):
             and p.suffix.lower() in _IMG_EXTS
             and p.stat().st_size > 1000
         )
+
+    def _image_folders_for(
+        self, product_name: str = "", color: str = "", meta: dict | None = None
+    ) -> list[Path]:
+        store = Path(self.settings.get("IMAGES_STORE", "dataset"))
+        folders: list[Path] = []
+        # Paths recorded in metadata.images (actual download location)
+        if meta:
+            for rel in meta.get("images") or []:
+                if not isinstance(rel, str):
+                    continue
+                folder = (store / rel).parent
+                if folder not in folders:
+                    folders.append(folder)
+            # Also legacy full/ metadata dir
+        pn = safe_name(product_name or (meta or {}).get("product_name", ""), 80)
+        col = safe_name(color or (meta or {}).get("color", "Default"), 40)
+        if pn:
+            for base in (store, store / "full"):
+                folders.append(base / safe_name(self.brand, 60) / pn / col)
+                # Glob any brand
+                folders.extend(base.glob(f"*/{pn}/{col}"))
+        return folders
+
+    def _load_done_product_ids(self) -> set[str]:
+        """
+        Mark a product done only when every known colour folder has enough
+        images. Metadata-only or sparse folders are queued for re-download.
+        """
+        store = Path(self.settings.get("IMAGES_STORE", "dataset"))
+        min_imgs = int(self.settings.getint("NORDSTROM_RESUME_MIN_IMAGES", 4) or 4)
+        # pid -> list[(n_images, product_url)]
+        by_pid: dict[str, list[tuple[int, str]]] = {}
+
+        def _note(pid: str, n: int, url: str) -> None:
+            if not pid:
+                return
+            by_pid.setdefault(pid, []).append((n, url or ""))
+
+        meta_roots = [store / "Nordstrom", store / "full" / "Nordstrom"]
+        seen_meta: set[Path] = set()
+        for root in meta_roots:
+            if not root.is_dir():
+                continue
+            for meta_path in root.rglob("metadata.json"):
+                if meta_path in seen_meta:
+                    continue
+                seen_meta.add(meta_path)
+                try:
+                    data = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                source = (data.get("source") or "").lower()
+                url = data.get("product_url") or ""
+                if source != "nordstrom" and "nordstrom.com" not in url.lower():
+                    continue
+                pid = self._product_id(url) or str(data.get("sku") or "")
+                n = self._count_imgs_in(meta_path.parent)
+                if n < min_imgs:
+                    for folder in self._image_folders_for(meta=data):
+                        n = max(n, self._count_imgs_in(folder))
+                # Metadata lists files that are missing on disk → treat as sparse
+                listed = data.get("images") or []
+                if listed and n < len(listed):
+                    present = 0
+                    for rel in listed:
+                        if not isinstance(rel, str):
+                            continue
+                        for cand in (store / rel, store / "full" / rel):
+                            if cand.is_file() and cand.stat().st_size > 1000:
+                                present += 1
+                                break
+                    n = max(n, present)
+                    if present < len(listed) and present < min_imgs:
+                        n = present  # force incomplete
+                _note(pid, n, url)
+
+        nord_root = store / "Nordstrom"
+        if nord_root.is_dir():
+            for color_dir in nord_root.glob("*/*"):
+                if not color_dir.is_dir():
+                    continue
+                n = self._count_imgs_in(color_dir)
+                url = ""
+                pid = ""
+                meta_file = color_dir / "metadata.json"
+                if meta_file.is_file():
+                    try:
+                        data = json.loads(meta_file.read_text(encoding="utf-8"))
+                        url = data.get("product_url") or ""
+                        pid = self._product_id(url) or str(data.get("sku") or "")
+                    except Exception:
+                        pass
+                if pid:
+                    _note(pid, n, url)
+
+        done: set[str] = set()
+        incomplete: list[str] = []
+        for pid, entries in by_pid.items():
+            # Complete only if every folder for this pid has enough images
+            if entries and all(n >= min_imgs for n, _ in entries):
+                done.add(pid)
+            else:
+                for n, url in entries:
+                    if n < min_imgs and url and "/s/" in url:
+                        incomplete.append(url)
+
+        # Dedupe incomplete URLs
+        seen_u: set[str] = set()
+        uniq: list[str] = []
+        for u in incomplete:
+            pid = self._product_id(u)
+            key = pid or u
+            if key in seen_u:
+                continue
+            seen_u.add(key)
+            uniq.append(u)
+        self._incomplete_urls = uniq
+        if uniq:
+            self.logger.info(
+                "[Nordstrom] Found %d incomplete product(s) "
+                "(metadata-only or < %d images)",
+                len(uniq),
+                min_imgs,
+            )
+        return done
+
+    def _folder_image_count(self, product_name: str, color: str) -> int:
+        best = 0
+        for folder in self._image_folders_for(product_name, color):
+            best = max(best, self._count_imgs_in(folder))
+        return best
 
     # ── Listing helpers ──────────────────────────────────────────────────────
 
@@ -745,7 +1038,7 @@ class NordstromSpider(EcommerceSpider):
     def _is_blocked(self, response) -> bool:
         url = (response.url or "").lower()
         text = (response.text or "")[:8000].lower()
-        if "siteclosed.nordstrom.com" in url or "invitation.html" in url:
+        if self._is_blocked_url(url):
             return True
         if "this site is not available" in text or "not available in your region" in text:
             return True
